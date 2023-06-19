@@ -1,7 +1,6 @@
-import dpkt
 import socket
-from .utils import *
-
+import dpkt
+from utils import *
 
 # 协议特征字段
 HTTP_HEADER = {}
@@ -29,8 +28,9 @@ def parse_pcap(input_path: str):
         input_pcap = dpkt.pcap.Reader(pcap_file)
         packet_count = 0
         # 连接状态判断辅助变量
-        tcp_port_dict = {}
-        udp_port_dict = {}
+        tcp_4tuple_dict = {}
+        tcp_handshake_comlete = {}
+        udp_4tuple_dict = {}
         for ts, buf in input_pcap:
             packet_count += 1
             eth = dpkt.ethernet.Ethernet(buf)
@@ -43,13 +43,35 @@ def parse_pcap(input_path: str):
             if isinstance(ip.data, dpkt.tcp.TCP):
                 tcp = ip.data
                 sport = tcp.sport
-                dst = tcp.dport
-                # 如果本包tcp负载大于0，则根据本包所属连接是否已解析过采取不同处理
+                dport = tcp.dport
+                src2dst = (src, sport, dst, dport)
+                src2dst_rvs = (dst, dport, src, sport)
+                # 如果本包tcp负载大于0，则根据本包所属连接是否完成握手、是否已解析过采取不同处理
                 if len(tcp.data) > 0:
-                    pass
+                    # 四元组已在字典中，表示已解析过。统计四元组包数量
+                    if src2dst in tcp_4tuple_dict or src2dst_rvs in tcp_4tuple_dict:
+                        try:
+                            tcp_4tuple_dict[src2dst] += 1
+                        except KeyError:
+                            tcp_4tuple_dict[src2dst_rvs] += 1
+                    # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
+                    else:
+                        tcp_4tuple_dict[src2dst] = 1
+                        # 根据dpkt解析方式，tcp的flags采用数值形式，[SYN]flags==2,[SYN,ACK]flags==18,[ACK]flags==16，故使用下面判断条件判断握手完成
+                        if tcp_handshake_comlete[src2dst] == [2, 18, 16]:
+                            parse_tcp(tcp)
+
                 # 如果本包tcp负载为0，则进行握手标志位判断
                 else:
-                    pass
+                    if src2dst in tcp_handshake_comlete or src2dst_rvs in tcp_handshake_comlete:
+                        try:
+                            tcp_handshake_comlete[src2dst].append(tcp.flags)
+                        except KeyError:
+                            tcp_handshake_comlete[src2dst_rvs].append(tcp.flags)
+                    else:
+                        tcp_handshake_comlete[src2dst] = []
+                        tcp_handshake_comlete[src2dst].append(tcp.flags)
+
             elif isinstance(ip.data, dpkt.udp.UDP):
                 parse_udp(ip.data)
             else:
@@ -79,7 +101,7 @@ def parse_tcp(tcp: dpkt.tcp.TCP):
 
 
 def parse_http_request(http: dpkt.http.Request, dport: int):
-
+    pass
 
 
 def parse_udp(udp: dpkt.udp.UDP):
