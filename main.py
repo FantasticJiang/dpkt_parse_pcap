@@ -57,20 +57,19 @@ def parse_pcap(input_path: str):
                     # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
                     else:
                         tcp_4tuple_dict[src2dst] = 1
-                        # 根据dpkt解析方式，tcp的flags采用数值形式，[SYN]flags==2,[SYN,ACK]flags==18,[ACK]flags==16，故使用下面判断条件判断握手完成
-                        if tcp_handshake_comlete[src2dst] == [2, 18, 16]:
+                        if tcp_handshake_comlete[src2dst] >= 3:
                             parse_tcp(tcp)
 
                 # 如果本包tcp负载为0，则进行握手标志位判断
                 else:
                     if src2dst in tcp_handshake_comlete or src2dst_rvs in tcp_handshake_comlete:
                         try:
-                            tcp_handshake_comlete[src2dst].append(tcp.flags)
+                            tcp_handshake_comlete[src2dst] += 1
                         except KeyError:
-                            tcp_handshake_comlete[src2dst_rvs].append(tcp.flags)
+                            tcp_handshake_comlete[src2dst_rvs] += 1
                     else:
-                        tcp_handshake_comlete[src2dst] = []
-                        tcp_handshake_comlete[src2dst].append(tcp.flags)
+                        tcp_handshake_comlete[src2dst] = 1
+
 
             elif isinstance(ip.data, dpkt.udp.UDP):
                 parse_udp(ip.data)
