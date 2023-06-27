@@ -21,13 +21,14 @@ UDP_PAYLOAD = {}
 QUIC_SNI = {}
 DNS_QUERY = {}
 other_tcp_payload_len = 30
-udp_payload_len = 30
+udp_payload_len = 20
 
 # 状态判断辅助变量
 tcp_4tuple_dict = {}  # 判断一条tcp流是否已解析过一次
 tcp_handshake_comlete = {}  # 判断tcp连接是否建立完成
 tlsSNI_parsed_port_pair = {}  # 判断是否成功进入过TLS server_name解析流程，用于后续判断是否需要尝试解析common_name
-udp_4tuple_dict = {}
+port_pair_c2s = {}  # 判断包的流向
+udp_4tuple_dict = {}  # 判断一条udp流是否已解析过一次
 
 
 def write_parse_result(filename: str):
@@ -45,21 +46,30 @@ def write_parse_result(filename: str):
     if QUIC_SNI:
         write_dict_to_file(QUIC_SNI, filename, '_quic_sni.log')
 
-    write_dict_to_file(TCP_PAYLOAD, filename, '_tcp_flow.log')
-    write_dict_to_file(UDP_PAYLOAD, filename, '_udp_flow.log')
-    write_dict_to_file(DNS_QUERY, filename, 'dns_query.log')
+    write_dict_to_file(DNS_QUERY, filename, '_dns_query.log')
+    write_dict_bysort(TCP_PAYLOAD, filename, '_tcp_flow.log')
+    write_dict_bysort(UDP_PAYLOAD, filename, '_udp_flow.log')
+
 
 
 
 def parse_pcap(input_path: str):
     # try:
     pcap_file = open(input_path, 'rb')
-    input_pcap = dpkt.pcap.Reader(pcap_file)
+    # 读取文件的magic字段，读完之后将文件指针重置到0位置
+    magic_head = pcap_file.read(4)
+    pcap_file.seek(0, 0)
+    if magic_head == b'\n\r\r\n':
+        input_pcap = dpkt.pcapng.Reader(pcap_file)
+    elif magic_head == b'\xd4\xc3\xb2\xa1':
+        input_pcap = dpkt.pcap.Reader(pcap_file)
+    else:
+        print('It is not a pcapng or pcap file.')
+        exit(1)
     packet_count = 0
     global tcp_4tuple_dict
     global tcp_handshake_comlete
     global tlsSNI_parsed_port_pair
-    global udp_4tuple_dict
     for _, buf in input_pcap:
         packet_count += 1
         print(packet_count)
@@ -76,6 +86,8 @@ def parse_pcap(input_path: str):
             tcp = ip.data
             sport = tcp.sport
             dport = tcp.dport
+            if not (sport, dport) in port_pair_c2s and not (dport, sport) in port_pair_c2s:
+                port_pair_c2s[(sport, dport)] = True
             src2dst = (src, sport, dst, dport)
             src2dst_rvs = (dst, dport, src, sport)
             # 如果本包tcp负载大于0，则根据本包所属连接是否完成握手、是否已解析过采取不同处理
@@ -89,13 +101,16 @@ def parse_pcap(input_path: str):
                     if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[:2] and b'\x55\x04\x03' in tcp.data:
                         try:
                             parse_tls_cn(tcp.data, sport)
-                        except:  # 不解析TLS流中的TCP包
-                            pass
+                        except Exception as e:
+                            print(e)
                 # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
                 else:
                     tcp_4tuple_dict[src2dst] = 1
-                    if tcp_handshake_comlete[src2dst] >= 3:
-                        parse_tcp(tcp)
+                    try:
+                        if tcp_handshake_comlete[src2dst] >= 3:
+                            parse_tcp(tcp)
+                    except KeyError:
+                        print("May encounter TCP streams with uncaptured three-way handshake, skipping.")
 
             # 如果本包tcp负载为0，则进行握手标志位判断
             else:
@@ -109,12 +124,23 @@ def parse_pcap(input_path: str):
 
         # UDP
         elif isinstance(ip.data, dpkt.udp.UDP):
-            parse_udp(ip.data)
+            udp = ip.data
+            if (udp.sport, udp.dport) not in udp_4tuple_dict and (udp.dport, udp.sport) not in udp_4tuple_dict:
+                if udp.dport == 53:
+                    try:
+                        parse_dns(udp)
+                    except:
+                        parse_udp(udp)
+                else:
+                    parse_udp(udp)
+                udp_4tuple_dict[(udp.sport, udp.dport)] = True
+                udp_4tuple_dict[(udp.dport, udp.sport)] = True
+
         else:
             print("skip none tcp and udp packet.")
             continue
 
-        if packet_count%1000 == 0:
+        if packet_count % 1000 == 0:
             print(f'已解析分组数：{packet_count}')
 
     # 解析完pcap文件中的所有分组，将特征字典写入log文件
@@ -130,7 +156,6 @@ def parse_pcap(input_path: str):
 def parse_tcp(tcp: dpkt.tcp.TCP):
     if len(tcp.data) == 0:
         return
-
     # dpkt似乎没有方法可以在读到一个packet时得知其具有的应用层协议还是仅tcp协议，必须从下往上层层剥离。
     # 解析HTTP/HTTPS目前想到的两种方式可能只能是：
     # （1）判断tcp.data是否含有HTTP/HTTPS特有的内容；
@@ -145,9 +170,13 @@ def parse_tcp(tcp: dpkt.tcp.TCP):
             parse_tls_server(tls, tcp.dport)
             tlsSNI_parsed_port_pair[(tcp.sport, tcp.dport)] = 1
         except:  # 若尝试解析TLS仍引发异常，则按普通TCP Payload解析
-            pass
+            tcp_payload = str(tcp.data[:other_tcp_payload_len])
+            if (tcp.sport, tcp.dport) in port_pair_c2s:
+                tcp_payload += f"    {str(tcp.sport)}:{str(tcp.dport)}"
+            else:
+                tcp_payload += f"    {str(tcp.dport)}:{str(tcp.sport)}[reply]"
+            add_dict_kv(TCP_PAYLOAD, tcp_payload)
 
-    pass
 
 
 def parse_http_request(http: dpkt.http.Request, dport: int):
@@ -157,8 +186,9 @@ def parse_http_request(http: dpkt.http.Request, dport: int):
     headers['uri'] = http.uri
     # basic fields
     add_dict_kv(HTTP_HOST, headers['host']+f" [{dport}]")
-    add_dict_kv(HTTP_UA, headers['user-agent']+f" [{dport}]")
-    add_dict_kv(HTTP_URL, headers['method']+" "+headers['uri']+f" [{dport}]")
+    add_dict_kv(HTTP_URL, headers['method'] + " " + headers['uri'] + f" [{dport}]")
+    if 'user-agent' in headers:
+        add_dict_kv(HTTP_UA, headers['user-agent']+f" [{dport}]")
     # special fields (if exists)
     if 'referer' in headers:
         add_dict_kv(HTTP_REFERER, headers['referer']+f" [{dport}]")
@@ -196,10 +226,21 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
 
 
 def parse_udp(udp: dpkt.udp.UDP):
+    udp_payload = str(udp.data[:udp_payload_len]) + f"    {str(udp.sport)}:{str(udp.dport)}"
+    add_dict_kv(UDP_PAYLOAD, udp_payload)
 
-    pass
+
+
+def parse_dns(udp: dpkt.udp.UDP):
+    dns = dpkt.dns.DNS(udp.data)
+    query = dns.qd[0].name
+    add_dict_kv(DNS_QUERY, query)
 
 
 if __name__ == "__main__":
-    input_pcap_file = './pcaps/WeGame8001TLS.pcap'
+    input_pcap_file = './pcaps/ios1.pcapng'
+    import time
+    start = time.time()
     parse_pcap(input_pcap_file)
+    print(start)
+    print(time.time())

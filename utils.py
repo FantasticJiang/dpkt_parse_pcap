@@ -19,7 +19,8 @@ def write_dict_to_file(target_dict, filepath: str, file_suffix: str = '', ):
     if isinstance(target_dict, dict) and target_dict:
         f = open(filename, 'w')
         try:
-            json.dump(target_dict, f, indent=1, ensure_ascii=False)
+            for key, value in target_dict.items():
+                f.write(f"{key}: {str(value)}\n")
         finally:
             f.close()
             target_dict.clear()
@@ -32,16 +33,18 @@ def write_dict_to_file(target_dict, filepath: str, file_suffix: str = '', ):
             if sub_dict:
                 if count > 0:
                     f.write('\n')
-                f.write(field_list[dict_num]+'\n')
-                json.dump(sub_dict, f, indent=1, ensure_ascii=False)
+                f.write(f'[{field_list[dict_num]}]\n')
+                for key, value in sub_dict.items():
+                    f.write(f"{key}: {value}\n")
                 f.write('\n')
                 sub_dict.clear()
                 count += 1
         f.close()
 
 
-def write_dict_bysort(filename: str, target_dict: dict):
+def write_dict_bysort(target_dict, filepath: str, file_suffix: str = '', ):
     if target_dict:
+        filename = filepath + file_suffix
         f = open(filename, 'w')
         for k in sorted(target_dict):
             f.write(k + ':' + str(target_dict[k]) + '\n')
