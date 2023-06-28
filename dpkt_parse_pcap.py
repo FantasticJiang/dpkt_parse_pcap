@@ -25,7 +25,7 @@ udp_payload_len = 20
 
 # 状态判断辅助变量
 tcp_4tuple_dict = {}  # 判断一条tcp流是否已解析过一次
-tcp_handshake_comlete = {}  # 判断tcp连接是否建立完成
+tcp_handshake_complete = {}  # 判断tcp连接是否建立完成
 tlsSNI_parsed_port_pair = {}  # 判断是否成功进入过TLS server_name解析流程，用于后续判断是否需要尝试解析common_name
 port_pair_c2s = {}  # 判断包的流向
 udp_4tuple_dict = {}  # 判断一条udp流是否已解析过一次
@@ -68,7 +68,7 @@ def parse_pcap(input_path: str):
         exit(1)
     packet_count = 0
     global tcp_4tuple_dict
-    global tcp_handshake_comlete
+    global tcp_handshake_complete
     global tlsSNI_parsed_port_pair
     for _, buf in input_pcap:
         packet_count += 1
@@ -107,20 +107,20 @@ def parse_pcap(input_path: str):
                 else:
                     tcp_4tuple_dict[src2dst] = 1
                     try:
-                        if tcp_handshake_comlete[src2dst] >= 3:
+                        if tcp_handshake_complete[src2dst] >= 3:
                             parse_tcp(tcp)
                     except KeyError:
                         print("May encounter TCP streams with uncaptured three-way handshake, skipping.")
 
             # 如果本包tcp负载为0，则进行握手标志位判断
             else:
-                if src2dst in tcp_handshake_comlete or src2dst_rvs in tcp_handshake_comlete:
+                if src2dst in tcp_handshake_complete or src2dst_rvs in tcp_handshake_complete:
                     try:
-                        tcp_handshake_comlete[src2dst] += 1
+                        tcp_handshake_complete[src2dst] += 1
                     except KeyError:
-                        tcp_handshake_comlete[src2dst_rvs] += 1
+                        tcp_handshake_complete[src2dst_rvs] += 1
                 else:
-                    tcp_handshake_comlete[src2dst] = 1
+                    tcp_handshake_complete[src2dst] = 1
 
         # UDP
         elif isinstance(ip.data, dpkt.udp.UDP):
@@ -178,7 +178,6 @@ def parse_tcp(tcp: dpkt.tcp.TCP):
             add_dict_kv(TCP_PAYLOAD, tcp_payload)
 
 
-
 def parse_http_request(http: dpkt.http.Request, dport: int):
     # dpkt.http.Request对象将HTTP请求的状态行（第一行）中method、uri、version单独作为成员变量，第二行开始的所有HTTP字段放入名为header的有序字典变量中。
     headers = http.headers
@@ -228,7 +227,6 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
 def parse_udp(udp: dpkt.udp.UDP):
     udp_payload = str(udp.data[:udp_payload_len]) + f"    {str(udp.sport)}:{str(udp.dport)}"
     add_dict_kv(UDP_PAYLOAD, udp_payload)
-
 
 
 def parse_dns(udp: dpkt.udp.UDP):
