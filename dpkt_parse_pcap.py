@@ -144,7 +144,8 @@ def parse_pcap(input_path: str, qtuiobj=None):
             if qtuiobj:
                 qtuiobj.refresh_number(packet_count)
             print(f'已解析分组数：{packet_count}')
-    qtuiobj.refresh_number(packet_count)
+    if qtuiobj:
+        qtuiobj.refresh_number(packet_count)
     # 解析完pcap文件中的所有分组，将特征字典写入log文件
     import os
     filename = os.path.splitext(input_path)[0]
