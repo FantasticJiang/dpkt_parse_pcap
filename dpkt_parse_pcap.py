@@ -53,7 +53,7 @@ def write_parse_result(filename: str):
 
 
 
-def parse_pcap(input_path: str):
+def parse_pcap(input_path: str, qtuiobj=None):
     # try:
     pcap_file = open(input_path, 'rb')
     # 读取文件的magic字段，读完之后将文件指针重置到0位置
@@ -140,9 +140,11 @@ def parse_pcap(input_path: str):
             print("skip none tcp and udp packet.")
             continue
 
-        if packet_count % 1000 == 0:
+        if packet_count % 5000 == 0:
+            if qtuiobj:
+                qtuiobj.refresh_number(packet_count)
             print(f'已解析分组数：{packet_count}')
-
+    qtuiobj.refresh_number(packet_count)
     # 解析完pcap文件中的所有分组，将特征字典写入log文件
     import os
     filename = os.path.splitext(input_path)[0]
@@ -184,21 +186,25 @@ def parse_http_request(http: dpkt.http.Request, dport: int):
     headers['method'] = http.method
     headers['uri'] = http.uri
     # basic fields
-    add_dict_kv(HTTP_HOST, headers['host']+f" [{dport}]")
-    add_dict_kv(HTTP_URL, headers['method'] + " " + headers['uri'] + f" [{dport}]")
+    add_dict_kv(HTTP_HOST, headers['host']+f" [{str(dport)}]")
+    add_dict_kv(HTTP_URL, headers['method'] + " " + headers['uri'] + f" [{str(dport)}]")
     if 'user-agent' in headers:
-        add_dict_kv(HTTP_UA, headers['user-agent']+f" [{dport}]")
+        if isinstance(headers['user-agent'], str):
+            add_dict_kv(HTTP_UA, headers['user-agent']+f" [{str(dport)}]")
+        elif isinstance(headers['user-agent'], list):
+            for ua in headers['user-agent']:
+                add_dict_kv(HTTP_UA, ua+f" [{str(dport)}]")
     # special fields (if exists)
     if 'referer' in headers:
-        add_dict_kv(HTTP_REFERER, headers['referer']+f" [{dport}]")
+        add_dict_kv(HTTP_REFERER, headers['referer']+f" [{str(dport)}]")
     if 'bundleid' in headers:
-        add_dict_kv(HTTP_BUNDLEID, headers['bundleid']+f" [{dport}]")
+        add_dict_kv(HTTP_BUNDLEID, headers['bundleid']+f" [{str(dport)}]")
     if 'user-identity' in headers:
-        add_dict_kv(HTTP_USER_IDENTITY, headers['user-identity']+f" [{dport}]")
+        add_dict_kv(HTTP_USER_IDENTITY, headers['user-identity']+f" [{str(dport)}]")
     if 'x-requested-with' in headers:
-        add_dict_kv(HTTP_XRW, headers['x-requested-with']+f" [{dport}]")
+        add_dict_kv(HTTP_XRW, headers['x-requested-with']+f" [{str(dport)}]")
     if 'q-ua2' in headers:
-        add_dict_kv(HTTP_Q_UA2, headers['q-ua2']+f" [{dport}]")
+        add_dict_kv(HTTP_Q_UA2, headers['q-ua2']+f" [{str(dport)}]")
     # print(f'HTTP request: {repr(http)}')
 
 
