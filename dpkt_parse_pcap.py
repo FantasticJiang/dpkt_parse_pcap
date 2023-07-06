@@ -31,6 +31,15 @@ port_pair_c2s = {}  # 判断包的流向
 udp_4tuple_dict = {}  # 判断一条udp流是否已解析过一次
 
 
+
+def clear_temp_dict():
+    tcp_4tuple_dict.clear()
+    tcp_handshake_complete.clear()
+    tlsSNI_parsed_port_pair.clear()
+    port_pair_c2s.clear()
+    udp_4tuple_dict.clear()
+
+
 def write_parse_result(filename: str):
     # HTTP
     write_dict_to_file(HTTP_HOST, filename, '_host.log')
@@ -50,6 +59,7 @@ def write_parse_result(filename: str):
     write_dict_bysort(TCP_PAYLOAD, filename, '_tcp_flow.log')
     write_dict_bysort(UDP_PAYLOAD, filename, '_udp_flow.log')
 
+    clear_temp_dict()  # 清空状态辅助字典
 
 
 
@@ -74,71 +84,35 @@ def parse_pcap(input_path: str, qtuiobj=None):
         packet_count += 1
         print(packet_count)
         eth = dpkt.ethernet.Ethernet(buf)
-        # 这样写的话会同时跳过IPv6报文，后续要改
-        if not isinstance(eth.data, dpkt.ip.IP):
-            print("skip non IP packet.")
-            continue
-        ip = eth.data
-        src = socket.inet_ntoa(ip.src)
-        dst = socket.inet_ntoa(ip.dst)
-        # TCP
-        if isinstance(ip.data, dpkt.tcp.TCP):
-            tcp = ip.data
-            sport = tcp.sport
-            dport = tcp.dport
-            if not (sport, dport) in port_pair_c2s and not (dport, sport) in port_pair_c2s:
-                port_pair_c2s[(sport, dport)] = True
-            src2dst = (src, sport, dst, dport)
-            src2dst_rvs = (dst, dport, src, sport)
-            # 如果本包tcp负载大于0，则根据本包所属连接是否完成握手、是否已解析过采取不同处理
-            if len(tcp.data) > 0:
-                # 四元组已在字典中，表示已解析过一次。统计四元组包数量。
-                if src2dst in tcp_4tuple_dict or src2dst_rvs in tcp_4tuple_dict:
-                    try:
-                        tcp_4tuple_dict[src2dst] += 1
-                    except KeyError:
-                        tcp_4tuple_dict[src2dst_rvs] += 1
-                    if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[:2] and b'\x55\x04\x03' in tcp.data:
-                        try:
-                            parse_tls_cn(tcp.data, sport)
-                        except Exception as e:
-                            print(e)
-                # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
-                else:
-                    tcp_4tuple_dict[src2dst] = 1
-                    try:
-                        if tcp_handshake_complete[src2dst] >= 3:
-                            parse_tcp(tcp)
-                    except KeyError:
-                        print("May encounter TCP streams with uncaptured three-way handshake, skipping.")
-
-            # 如果本包tcp负载为0，则进行握手标志位判断
+        if eth.type == 2048:  # eth.type==0x0800(十进制2048)指代上层为IP报头
+            ip = eth.data
+            src = socket.inet_ntoa(ip.src)
+            dst = socket.inet_ntoa(ip.dst)
+            # TCP
+            if isinstance(ip.data, dpkt.tcp.TCP):
+                parse_tcp(ip.data, src, dst)
+            # UDP
+            elif isinstance(ip.data, dpkt.udp.UDP):
+                parse_udp(ip.data, src, dst)
             else:
-                if src2dst in tcp_handshake_complete or src2dst_rvs in tcp_handshake_complete:
-                    try:
-                        tcp_handshake_complete[src2dst] += 1
-                    except KeyError:
-                        tcp_handshake_complete[src2dst_rvs] += 1
-                else:
-                    tcp_handshake_complete[src2dst] = 1
+                print("skip none tcp and udp packet.")
+                continue
+        elif eth.type == 34525:  # eth.type == 0x86DD(十进制34525)表示上层是IPv6
+            pass
 
-        # UDP
-        elif isinstance(ip.data, dpkt.udp.UDP):
-            udp = ip.data
-            if (udp.sport, udp.dport) not in udp_4tuple_dict and (udp.dport, udp.sport) not in udp_4tuple_dict:
-                if udp.dport == 53:
-                    try:
-                        parse_dns(udp)
-                    except:
-                        parse_udp(udp)
-                else:
-                    parse_udp(udp)
-                udp_4tuple_dict[(udp.sport, udp.dport)] = True
-                udp_4tuple_dict[(udp.dport, udp.sport)] = True
-
+        # 非IPv4和IPv6，判断是否是PCAPDroid等工具抓取、没有二层报头的报文。
         else:
-            print("skip none tcp and udp packet.")
-            continue
+            ip = dpkt.ip.IP(buf)  # 尝试将buf解析为IP报文
+            if isinstance(ip.data, dpkt.tcp.TCP):  # 如果为True则认为是没有二层报头、传输层为TCP的IP报文
+                src = socket.inet_ntoa(ip.src)
+                dst = socket.inet_ntoa(ip.dst)
+                parse_tcp(ip.data, src, dst)
+            elif isinstance(ip.data, dpkt.udp.UDP):
+                src = socket.inet_ntoa(ip.src)
+                dst = socket.inet_ntoa(ip.dst)
+                parse_tcp(ip.data, src, dst)
+            else:
+                print("skip none IP packet.")
 
         if packet_count % 5000 == 0:
             if qtuiobj:
@@ -156,7 +130,48 @@ def parse_pcap(input_path: str, qtuiobj=None):
     pcap_file.close()
 
 
-def parse_tcp(tcp: dpkt.tcp.TCP):
+def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
+    sport = tcp.sport
+    dport = tcp.dport
+    if not (sport, dport) in port_pair_c2s and not (dport, sport) in port_pair_c2s:
+        port_pair_c2s[(sport, dport)] = True
+    src2dst = (src, sport, dst, dport)
+    src2dst_rvs = (dst, dport, src, sport)
+    # 如果本包tcp负载大于0，则根据本包所属连接是否完成握手、是否已解析过采取不同处理
+    if len(tcp.data) > 0:
+        # 四元组已在字典中，表示已解析过一次。统计四元组包数量。
+        if src2dst in tcp_4tuple_dict or src2dst_rvs in tcp_4tuple_dict:
+            try:
+                tcp_4tuple_dict[src2dst] += 1
+            except KeyError:
+                tcp_4tuple_dict[src2dst_rvs] += 1
+            if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[
+                                                                            :2] and b'\x55\x04\x03' in tcp.data:
+                try:
+                    parse_tls_cn(tcp.data, sport)
+                except Exception as e:
+                    print(e)
+        # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
+        else:
+            tcp_4tuple_dict[src2dst] = 1
+            try:
+                if tcp_handshake_complete[src2dst] >= 3:
+                    parse_tcp_application_layer(tcp)
+            except KeyError:
+                print("May encounter TCP streams with uncaptured three-way handshake, skipping.")
+
+    # 如果本包tcp负载为0，则进行握手标志位判断
+    else:
+        if src2dst in tcp_handshake_complete or src2dst_rvs in tcp_handshake_complete:
+            try:
+                tcp_handshake_complete[src2dst] += 1
+            except KeyError:
+                tcp_handshake_complete[src2dst_rvs] += 1
+        else:
+            tcp_handshake_complete[src2dst] = 1
+
+
+def parse_tcp_application_layer(tcp: dpkt.tcp.TCP):
     if len(tcp.data) == 0:
         return
     # dpkt似乎没有方法可以在读到一个packet时得知其具有的应用层协议还是仅tcp协议，必须从下往上层层剥离。
@@ -231,7 +246,20 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
             add_dict_kv(TLS_CN, commonName)
 
 
-def parse_udp(udp: dpkt.udp.UDP):
+def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
+    if (udp.sport, udp.dport) not in udp_4tuple_dict and (udp.dport, udp.sport) not in udp_4tuple_dict:
+        if udp.dport == 53:
+            try:
+                parse_dns(udp)
+            except:
+                parse_udp_payload(udp)
+        else:
+            parse_udp_payload(udp)
+        udp_4tuple_dict[(udp.sport, udp.dport)] = True
+        udp_4tuple_dict[(udp.dport, udp.sport)] = True
+
+
+def parse_udp_payload(udp: dpkt.udp.UDP):
     udp_payload = str(udp.data[:udp_payload_len]) + f"    {str(udp.sport)}:{str(udp.dport)}"
     add_dict_kv(UDP_PAYLOAD, udp_payload)
 
@@ -243,7 +271,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = './pcaps/ios1.pcapng'
+    input_pcap_file = './pcaps/没有二层报头的TLS.pcap'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
