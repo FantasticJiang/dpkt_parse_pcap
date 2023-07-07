@@ -23,19 +23,11 @@ class ParseWidget(QWidget):
         self.number_label = QLabel('已解析报文数：0')  # 创建一个显示数字的标签
         self.number_label.setFont(progress_font)
 
-        btn = QPushButton("test")
-        btn.clicked.connect(self.button_clicked)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.hint_label)
         layout.addWidget(self.number_label)
-        layout.addWidget(btn)
 
-    def button_clicked(self, s):
-        print("click", s)
-        dlg = QDialog(self)
-        dlg.setWindowTitle("hello")
-        dlg.exec()
 
 
     def dragEnterEvent(self, event):

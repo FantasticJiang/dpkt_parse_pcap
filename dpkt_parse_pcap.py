@@ -102,17 +102,20 @@ def parse_pcap(input_path: str, qtuiobj=None):
 
         # 非IPv4和IPv6，判断是否是PCAPDroid等工具抓取、没有二层报头的报文。
         else:
-            ip = dpkt.ip.IP(buf)  # 尝试将buf解析为IP报文
-            if isinstance(ip.data, dpkt.tcp.TCP):  # 如果为True则认为是没有二层报头、传输层为TCP的IP报文
-                src = socket.inet_ntoa(ip.src)
-                dst = socket.inet_ntoa(ip.dst)
-                parse_tcp(ip.data, src, dst)
-            elif isinstance(ip.data, dpkt.udp.UDP):
-                src = socket.inet_ntoa(ip.src)
-                dst = socket.inet_ntoa(ip.dst)
-                parse_tcp(ip.data, src, dst)
-            else:
-                print("skip none IP packet.")
+            try:
+                ip = dpkt.ip.IP(buf)  # 尝试将buf解析为IP报文
+                if isinstance(ip.data, dpkt.tcp.TCP):  # 如果为True则认为是没有二层报头、传输层为TCP的IP报文
+                    src = socket.inet_ntoa(ip.src)
+                    dst = socket.inet_ntoa(ip.dst)
+                    parse_tcp(ip.data, src, dst)
+                elif isinstance(ip.data, dpkt.udp.UDP):
+                    src = socket.inet_ntoa(ip.src)
+                    dst = socket.inet_ntoa(ip.dst)
+                    parse_tcp(ip.data, src, dst)
+                else:
+                    print("skip none IP packet.")
+            except dpkt.dpkt.UnpackError:  # ARP等二层报尝试解析为IP包时会抛出UnpackError，此时跳过该报文继续解析
+                continue
 
         if packet_count % 5000 == 0:
             if qtuiobj:
@@ -145,8 +148,7 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
                 tcp_4tuple_dict[src2dst] += 1
             except KeyError:
                 tcp_4tuple_dict[src2dst_rvs] += 1
-            if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[
-                                                                            :2] and b'\x55\x04\x03' in tcp.data:
+            if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[:2] and b'\x55\x04\x03' in tcp.data:
                 try:
                     parse_tls_cn(tcp.data, sport)
                 except Exception as e:
