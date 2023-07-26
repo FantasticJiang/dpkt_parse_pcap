@@ -160,8 +160,11 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
                 if tcp_handshake_complete[src2dst] >= 3:
                     parse_tcp_application_layer(tcp)
             except KeyError:
-                if tcp_handshake_complete[src2dst_rvs] >= 3:
-                    parse_tcp_application_layer(tcp)
+                try:
+                    if tcp_handshake_complete[src2dst_rvs] >= 3:
+                        parse_tcp_application_layer(tcp)
+                except KeyError:
+                    print("May encouter uncaptured TCP handshake.Skip")
 
     # 如果本包tcp负载为0，则进行握手标志位判断
     else:
@@ -274,7 +277,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = './pcaps/mhxy_private.pcap'
+    input_pcap_file = r'E:\pcap_collection\网易游戏抓包\梦幻西游手游\hw2.pcap'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
