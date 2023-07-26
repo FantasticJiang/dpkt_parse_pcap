@@ -160,7 +160,8 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
                 if tcp_handshake_complete[src2dst] >= 3:
                     parse_tcp_application_layer(tcp)
             except KeyError:
-                print("May encounter TCP streams with uncaptured three-way handshake, skipping.")
+                if tcp_handshake_complete[src2dst_rvs] >= 3:
+                    parse_tcp_application_layer(tcp)
 
     # 如果本包tcp负载为0，则进行握手标志位判断
     else:
@@ -273,7 +274,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = './pcaps/没有二层报头的TLS.pcap'
+    input_pcap_file = './pcaps/mhxy_private.pcap'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
