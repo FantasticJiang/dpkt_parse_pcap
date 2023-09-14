@@ -68,10 +68,13 @@ def parse_pcap(input_path: str, qtuiobj=None):
     pcap_file = open(input_path, 'rb')
     # 读取文件的magic字段，读完之后将文件指针重置到0位置
     magic_head = pcap_file.read(4)
+    # print(magic_head)
     pcap_file.seek(0, 0)
     if magic_head == b'\n\r\r\n':
         input_pcap = dpkt.pcapng.Reader(pcap_file)
     elif magic_head == b'\xd4\xc3\xb2\xa1':
+        input_pcap = dpkt.pcap.Reader(pcap_file)
+    elif magic_head == b'\xa1\xb2\xc3\xd4':
         input_pcap = dpkt.pcap.Reader(pcap_file)
     else:
         print('It is not a pcapng or pcap file.')
@@ -123,10 +126,10 @@ def parse_pcap(input_path: str, qtuiobj=None):
             print(f'已解析分组数：{packet_count}')
     if qtuiobj:
         qtuiobj.refresh_number(packet_count)
-    # 解析完pcap文件中的所有分组，将特征字典写入log文件
-    import os
-    filename = os.path.splitext(input_path)[0]
-    write_parse_result(filename)
+        # 解析完pcap文件中的所有分组，将特征字典写入log文件（在有UI的情况下才在parse内部写文件，如果是调用parse函数就先不写，留待调用处在需要时调用write_parse_result函数）
+        import os
+        filename = os.path.splitext(input_path)[0]
+        write_parse_result(filename)
     # except:
     #     pass
     # finally:
