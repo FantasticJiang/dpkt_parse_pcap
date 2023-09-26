@@ -85,7 +85,7 @@ def parse_pcap(input_path: str, qtuiobj=None):
     global tlsSNI_parsed_port_pair
     for _, buf in input_pcap:
         packet_count += 1
-        print(packet_count)
+        # print(packet_count)
         eth = dpkt.ethernet.Ethernet(buf)
         if eth.type == 2048:  # eth.type==0x0800(十进制2048)指代上层为IP报头
             ip = eth.data
@@ -114,7 +114,7 @@ def parse_pcap(input_path: str, qtuiobj=None):
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     src = socket.inet_ntoa(ip.src)
                     dst = socket.inet_ntoa(ip.dst)
-                    parse_tcp(ip.data, src, dst)
+                    parse_udp(ip.data, src, dst)
                 else:
                     print("skip none IP packet.")
             except dpkt.dpkt.UnpackError:  # ARP等二层报尝试解析为IP包时会抛出UnpackError，此时跳过该报文继续解析
@@ -161,11 +161,11 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
             tcp_4tuple_dict[src2dst] = 1
             try:
                 if tcp_handshake_complete[src2dst] >= 3:
-                    parse_tcp_application_layer(tcp)
+                    parse_tcp_application_layer(tcp, dst)
             except KeyError:
                 try:
                     if tcp_handshake_complete[src2dst_rvs] >= 3:
-                        parse_tcp_application_layer(tcp)
+                        parse_tcp_application_layer(tcp, src)
                 except KeyError:
                     print("May encouter uncaptured TCP handshake.Skip")
 
@@ -180,7 +180,7 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
             tcp_handshake_complete[src2dst] = 1
 
 
-def parse_tcp_application_layer(tcp: dpkt.tcp.TCP):
+def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
     if len(tcp.data) == 0:
         return
     # dpkt似乎没有方法可以在读到一个packet时得知其具有的应用层协议还是仅tcp协议，必须从下往上层层剥离。
@@ -199,9 +199,9 @@ def parse_tcp_application_layer(tcp: dpkt.tcp.TCP):
         except:  # 若尝试解析TLS仍引发异常，则按普通TCP Payload解析
             tcp_payload = str(tcp.data[:other_tcp_payload_len])
             if (tcp.sport, tcp.dport) in port_pair_c2s:
-                tcp_payload += f"    {str(tcp.sport)}:{str(tcp.dport)}"
+                tcp_payload += f"    {str(tcp.sport)}->{server_ipaddr}:{str(tcp.dport)}"
             else:
-                tcp_payload += f"    {str(tcp.dport)}:{str(tcp.sport)}[reply]"
+                tcp_payload += f"    {server_ipaddr}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
             add_dict_kv(TCP_PAYLOAD, tcp_payload)
 
 
@@ -261,15 +261,15 @@ def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
             try:
                 parse_dns(udp)
             except:
-                parse_udp_payload(udp)
+                parse_udp_payload(udp, src, dst)
         else:
-            parse_udp_payload(udp)
+            parse_udp_payload(udp, src, dst)
         udp_4tuple_dict[(udp.sport, udp.dport)] = True
         udp_4tuple_dict[(udp.dport, udp.sport)] = True
 
 
-def parse_udp_payload(udp: dpkt.udp.UDP):
-    udp_payload = str(udp.data[:udp_payload_len]) + f"    {str(udp.sport)}:{str(udp.dport)}"
+def parse_udp_payload(udp: dpkt.udp.UDP, srcaddr: str, dstaddr: str):
+    udp_payload = str(udp.data[:udp_payload_len]) + f"    {srcaddr}:{str(udp.sport)}->{dstaddr}:{str(udp.dport)}"
     add_dict_kv(UDP_PAYLOAD, udp_payload)
 
 
