@@ -5,7 +5,7 @@ def add_dict_kv(d: dict, key: str):
         d[key] = 1
 
 
-def write_dict_to_file(target_dict, filepath: str, file_suffix: str = '', ):
+def write_dict_to_file(target_dict, filepath: str, file_suffix: str = ''):
     """
     用于将字典或字典列表写入文件
     target_dict: 待写入文件的字典

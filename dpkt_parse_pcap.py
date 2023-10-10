@@ -256,7 +256,7 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
 
 
 def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
-    if (udp.sport, udp.dport) not in udp_4tuple_dict and (udp.dport, udp.sport) not in udp_4tuple_dict:
+    if (src, udp.sport, dst, udp.dport) not in udp_4tuple_dict and (dst, udp.dport, src, udp.sport) not in udp_4tuple_dict:
         if udp.dport == 53:
             try:
                 parse_dns(udp)
@@ -264,8 +264,8 @@ def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
                 parse_udp_payload(udp, src, dst)
         else:
             parse_udp_payload(udp, src, dst)
-        udp_4tuple_dict[(udp.sport, udp.dport)] = True
-        udp_4tuple_dict[(udp.dport, udp.sport)] = True
+        udp_4tuple_dict[(src, udp.sport, dst, udp.dport)] = True
+        udp_4tuple_dict[(dst, udp.dport, src, udp.sport)] = True
 
 
 def parse_udp_payload(udp: dpkt.udp.UDP, srcaddr: str, dstaddr: str):
