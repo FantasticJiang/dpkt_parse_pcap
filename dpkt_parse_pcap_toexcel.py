@@ -1,6 +1,10 @@
 import socket
 import dpkt
+import pandas
+import os
+import pandas as pd
 from utils import *
+
 
 # 协议特征字段
 HTTP_HEADER = {}
@@ -20,10 +24,14 @@ TCP_PAYLOAD_HEAD = {}
 TCP_PAYLOAD_TAIL = {}
 UDP_PAYLOAD_HEAD = {}
 UDP_PAYLOAD_TAIL = {}
-QUIC_SNI = {}
 DNS_QUERY = {}
 other_tcp_payload_len = 30
 udp_payload_len = 20
+feature_col = ["FileName", "src_ip", "sport", "dst_ip", "dport", "Host", "ServerName", "CommonName",  "UA",
+               "TCP_Payload", "UDP_Payload", "URL", "Referer", "BundleId", "X-Requested-With", "UserIdentity", "X-Umeng-SDK",
+               "Q-UA2"]
+df = pd.DataFrame(columns=feature_col)
+df.set_index(["FileName", 'src_ip', 'sport', 'dst_ip', 'dport'], inplace=True)
 
 # 状态判断辅助变量
 tcp_4tuple_dict = {}  # 判断一条tcp流是否已解析过一次
@@ -33,6 +41,12 @@ port_pair_c2s = {}  # 判断包的流向
 udp_4tuple_dict = {}  # 判断一条udp流是否已解析过一次
 
 
+def add_dataframe(index: str, key: str, value: str):
+    global df
+    src, sport, dst, dport = index.split('_')
+    src = src.replace('-', '.')
+    dst = dst.replace('-', '.')
+    df.loc[(index, src, sport, dst, dport), key] = value
 
 def clear_temp_dict():
     tcp_4tuple_dict.clear()
@@ -53,17 +67,17 @@ def write_parse_result(filename: str):
     write_dict_to_file(TLS_SERVER_NAME, filename, '_ser_name.log')
     write_dict_to_file(TLS_CN, filename, '_cn.log')
 
-    # QUIC
-    if QUIC_SNI:
-        write_dict_to_file(QUIC_SNI, filename, '_quic_sni.log')
-
     write_dict_to_file(DNS_QUERY, filename, '_dns_query.log')
     write_dict_bysort(TCP_PAYLOAD_HEAD, filename, '_tcp_flow_head.log')
     write_dict_bysort(TCP_PAYLOAD_TAIL, filename, '_tcp_flow_tail.log')
     write_dict_bysort(UDP_PAYLOAD_HEAD, filename, '_udp_flow_head.log')
     write_dict_bysort(UDP_PAYLOAD_TAIL, filename, '_udp_flow_tail.log')
-
     clear_temp_dict()  # 清空状态辅助字典
+
+    # 将表格写入文件，并清空dataframe
+    df.to_excel(f"{filename}_result.xlsx", sheet_name="特征汇总")
+    df.drop(df.index, inplace=True)
+
 
 
 
@@ -83,6 +97,7 @@ def parse_pcap(input_path: str, qtuiobj=None):
     else:
         print('It is not a pcapng or pcap file.')
         exit(1)
+    
     packet_count = 0
     global tcp_4tuple_dict
     global tcp_handshake_complete
@@ -127,11 +142,10 @@ def parse_pcap(input_path: str, qtuiobj=None):
         if packet_count % 5000 == 0:
             if qtuiobj:
                 qtuiobj.refresh_number(packet_count)
-            print(f'已解析分组数：{packet_count}')
+            # print(f'已解析分组数：{packet_count}')
     if qtuiobj:
         qtuiobj.refresh_number(packet_count)
         # 解析完pcap文件中的所有分组，将特征字典写入log文件（在有UI的情况下才在parse内部写文件，如果是调用parse函数就先不写，留待调用处在需要时调用write_parse_result函数）
-        import os
         filename = os.path.splitext(input_path)[0]
         write_parse_result(filename)
     # except:
@@ -155,10 +169,9 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
                 tcp_4tuple_dict[src2dst] += 1
             except KeyError:
                 tcp_4tuple_dict[src2dst_rvs] += 1
-            # '\x55\x04\x03'这三个字节通常在 ASN.1 编码的 X.509 证书中标记公共名称（common name）
             if (dport, sport) in tlsSNI_parsed_port_pair and b'\x16\x03' == tcp.data[:2] and b'\x55\x04\x03' in tcp.data:
                 try:
-                    parse_tls_cn(tcp.data, sport)
+                    parse_tls_cn(tcp.data, src, dst, sport, dport)
                 except Exception as e:
                     print(e)
         # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
@@ -166,13 +179,14 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
             tcp_4tuple_dict[src2dst] = 1
             try:
                 if tcp_handshake_complete[src2dst] == 36:
-                    parse_tcp_application_layer(tcp, dst)
+                    parse_tcp_application_layer(tcp, src, dst)
             except KeyError:
                 try:
                     if tcp_handshake_complete[src2dst_rvs] == 36:
-                        parse_tcp_application_layer(tcp, src)
+                        parse_tcp_application_layer(tcp, src, dst)
                 except KeyError:
-                    print("May encouter uncaptured TCP handshake.Skip")
+                    # print("May encouter uncaptured TCP handshake.Skip")
+                    pass
 
     # 如果本包tcp负载为0，则进行握手标志位判断
     else:
@@ -185,7 +199,7 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
             tcp_handshake_complete[src2dst] = tcp.flags
 
 
-def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
+def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, src: str, dst: str):
     if len(tcp.data) == 0:
         return
     # dpkt似乎没有方法可以在读到一个packet时得知其具有的应用层协议还是仅tcp协议，必须从下往上层层剥离。
@@ -194,55 +208,73 @@ def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
     # （2）异常处理，先将tcp.data直接当成HTTP解析，抛出异常时当成HTTPS解析，还抛出异常则当无应用层的TCP协议解析。
     try:
         request = dpkt.http.Request(tcp.data)
-        parse_http_request(request, tcp.dport)
+        parse_http_request(request, src, dst, tcp.sport, tcp.dport)
     except dpkt.dpkt.UnpackError:  # 若尝试解析HTTP引发UnpackError，改为尝试解析TLS server_name
         try:
             global tlsSNI_parsed_port_pair
             tls = dpkt.ssl.TLS(tcp.data)
-            parse_tls_server(tls, tcp.dport)
+            parse_tls_server(tls, src, dst, tcp.sport, tcp.dport)
             tlsSNI_parsed_port_pair[(tcp.sport, tcp.dport)] = 1
         except:  # 若尝试解析TLS仍引发异常，则按普通TCP Payload解析
             tcp_payload_head = str(tcp.data[:other_tcp_payload_len])
             tcp_payload_tail = str(tcp.data[-other_tcp_payload_len:])
             if (tcp.sport, tcp.dport) in port_pair_c2s:
-                tcp_payload_head += f"    {str(tcp.sport)}->{server_ipaddr}:{str(tcp.dport)}"
-                tcp_payload_tail += f"    {str(tcp.sport)}->{server_ipaddr}:{str(tcp.dport)}"
+                tcp_payload_head_ = tcp_payload_head + f"    {str(tcp.sport)}->{dst}:{str(tcp.dport)}"
+                tcp_payload_tail_ = tcp_payload_tail + f"    {str(tcp.sport)}->{dst}:{str(tcp.dport)}"
             else:
-                tcp_payload_head += f"    {server_ipaddr}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
-                tcp_payload_tail += f"    {server_ipaddr}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
-            add_dict_kv(TCP_PAYLOAD_HEAD, tcp_payload_head)
+                tcp_payload_head_ = tcp_payload_head + f"    {src}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
+                tcp_payload_tail_ = tcp_payload_tail + f"    {src}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
+            add_dict_kv(TCP_PAYLOAD_HEAD, tcp_payload_head_)
+            add_dataframe(f"{src.replace('.','-')}_{tcp.sport}_{dst.replace('.','-')}_{tcp.dport}", "TCP_Payload", tcp_payload_head)
             add_dict_kv(TCP_PAYLOAD_TAIL, tcp_payload_tail)
 
 
-def parse_http_request(http: dpkt.http.Request, dport: int):
+def parse_http_request(http: dpkt.http.Request, src: str, dst: str, sport: int, dport: int):
     # dpkt.http.Request对象将HTTP请求的状态行（第一行）中method、uri、version单独作为成员变量，第二行开始的所有HTTP字段放入名为header的有序字典变量中。
     headers = http.headers
     headers['method'] = http.method
     headers['uri'] = http.uri
     # basic fields
     add_dict_kv(HTTP_HOST, headers['host']+f" [{str(dport)}]")
+    add_dataframe(f"{src.replace('.','-')}_{sport}_{dst.replace('.','-')}_{dport}", "Host", headers['host'])
     add_dict_kv(HTTP_URL, headers['method'] + " " + headers['uri'] + f" [{str(dport)}]")
+    add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "URL", headers['method'] + " " + headers['uri'])
     if 'user-agent' in headers:
         if isinstance(headers['user-agent'], str):
             add_dict_kv(HTTP_UA, headers['user-agent']+f" [{str(dport)}]")
+            add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "UA",
+                          headers['user-agent'])
         elif isinstance(headers['user-agent'], list):
             for ua in headers['user-agent']:
                 add_dict_kv(HTTP_UA, ua+f" [{str(dport)}]")
     # special fields (if exists)
     if 'referer' in headers:
         add_dict_kv(HTTP_REFERER, headers['referer']+f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "Referer", headers['referer'])
     if 'bundleid' in headers:
         add_dict_kv(HTTP_BUNDLEID, headers['bundleid']+f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "BundleId",
+                      headers['bundleid'])
     if 'user-identity' in headers:
         add_dict_kv(HTTP_USER_IDENTITY, headers['user-identity']+f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "UserIdentity",
+                      headers['user-identity'])
     if 'x-requested-with' in headers:
         add_dict_kv(HTTP_XRW, headers['x-requested-with']+f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "X-Requested-With",
+                      headers['x-requested-with'])
     if 'q-ua2' in headers:
         add_dict_kv(HTTP_Q_UA2, headers['q-ua2']+f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "Q-UA2",
+                      headers['q-ua2'])
+    if 'x-umeng-sdk' in headers:
+        add_dict_kv(HTTP_X_UMENG_SDK, headers['x-umeng-sdk'] + f" [{str(dport)}]")
+        add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "X-Umeng-SDK",
+                      headers['x-umeng-sdk'])
     # print(f'HTTP request: {repr(http)}')
 
 
-def parse_tls_server(tls: dpkt.ssl.TLS, dport: int):
+def parse_tls_server(tls: dpkt.ssl.TLS, src: str, dst: str, sport: int, dport: int):
     handshake = dpkt.ssl.TLSHandshake(tls.records[0].data)
     client_hello = handshake.data
     for ext in client_hello.extensions:
@@ -250,9 +282,12 @@ def parse_tls_server(tls: dpkt.ssl.TLS, dport: int):
             ser_name = ext[1][5:].decode()
             ser_name_ = ser_name + f' [{str(dport)}]'
             add_dict_kv(TLS_SERVER_NAME, ser_name_)
+            global df
+            add_dataframe(f"{src.replace('.', '-')}_{sport}_{dst.replace('.', '-')}_{dport}", "ServerName",
+                          ser_name)
 
 
-def parse_tls_cn(tcpdata: bytes, dport: int):
+def parse_tls_cn(tcpdata: bytes, src: str, dst: str, sport: int, dport: int):
     import re
     # '\x55\x04\x03'这三个字节通常在 ASN.1 编码的 X.509 证书中标记公共名称（common name）
     cn_pos_list = [i.start() for i in re.finditer(b'\x55\x04\x03', tcpdata)]
@@ -260,8 +295,10 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
         cn_len = tcpdata[pos + 4]  # common name length
         commonName = tcpdata[pos+5 : pos+5+cn_len].decode(encoding='utf-8', errors='ignore')
         if ' ' not in commonName:
-            commonName = commonName + f' [{str(dport)}]'
-            add_dict_kv(TLS_CN, commonName)
+            commonName_ = commonName + f' [{str(dport)}]'
+            add_dict_kv(TLS_CN, commonName_)
+            add_dataframe(f"{dst.replace('.', '-')}_{dport}_{src.replace('.', '-')}_{sport}", "CommonName",
+                          commonName)
 
 
 def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
@@ -280,6 +317,8 @@ def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
 def parse_udp_payload(udp: dpkt.udp.UDP, srcaddr: str, dstaddr: str):
     udp_payload_head = str(udp.data[:udp_payload_len]) + f"    {str(udp.sport)}->{dstaddr}:{str(udp.dport)}"
     add_dict_kv(UDP_PAYLOAD_HEAD, udp_payload_head)
+    add_dataframe(f"{srcaddr.replace('.', '-')}_{udp.sport}_{dstaddr.replace('.', '-')}_{udp.dport}", "UDP_Payload",
+                  udp.data[:udp_payload_len])
     udp_payload_tail = str(udp.data[-udp_payload_len:]) + f"    {str(udp.sport)}->{dstaddr}:{str(udp.dport)}"
     add_dict_kv(UDP_PAYLOAD_TAIL, udp_payload_tail)
 
@@ -291,9 +330,11 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'F:\pcap_fac\20231204-20231205\classified_by_hwapp\4399\20231204.pcap.TCP_10-61-15-7_38844_183-6-211-61_443.pcap'
+    input_pcap_file = r'E:\pcap_collection\网易游戏抓包\梦幻西游手游\hw2.pcap'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
+    filename = os.path.splitext(input_pcap_file)[0]
+    write_parse_result(filename)
     print(start)
     print(time.time())
