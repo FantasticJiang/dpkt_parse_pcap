@@ -1,6 +1,5 @@
 import socket
 import dpkt
-import pandas
 import os
 import pandas as pd
 from utils import *

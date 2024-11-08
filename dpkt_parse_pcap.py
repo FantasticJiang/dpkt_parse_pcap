@@ -1,5 +1,6 @@
 import socket
 import dpkt
+from dpkt import UnpackError, NeedData
 from utils import *
 
 # 协议特征字段
@@ -25,12 +26,16 @@ DNS_QUERY = {}
 other_tcp_payload_len = 30
 udp_payload_len = 20
 
+tls_caches: dict = {}
+http_caches: dict = {}
+
 # 状态判断辅助变量
 tcp_4tuple_dict = {}  # 判断一条tcp流是否已解析过一次
 tcp_handshake_complete = {}  # 判断tcp连接是否建立完成
 tlsSNI_parsed_port_pair = {}  # 判断是否成功进入过TLS server_name解析流程，用于后续判断是否需要尝试解析common_name
 port_pair_c2s = {}  # 判断包的流向
 udp_4tuple_dict = {}  # 判断一条udp流是否已解析过一次
+SYN_ACK = {}  # 判断一条流有抓到Server->Client的syn_ack包
 
 
 
@@ -40,6 +45,8 @@ def clear_temp_dict():
     tlsSNI_parsed_port_pair.clear()
     port_pair_c2s.clear()
     udp_4tuple_dict.clear()
+    tls_caches.clear()
+    http_caches.clear()
 
 
 def write_parse_result(filename: str):
@@ -131,9 +138,10 @@ def parse_pcap(input_path: str, qtuiobj=None):
     if qtuiobj:
         qtuiobj.refresh_number(packet_count)
         # 解析完pcap文件中的所有分组，将特征字典写入log文件（在有UI的情况下才在parse内部写文件，如果是调用parse函数就先不写，留待调用处在需要时调用write_parse_result函数）
-        import os
-        filename = os.path.splitext(input_path)[0]
-        write_parse_result(filename)
+    # print(tcp_4tuple_dict)
+    import os
+    filename = os.path.splitext(input_path)[0]
+    write_parse_result(filename)
     # except:
     #     pass
     # finally:
@@ -141,6 +149,7 @@ def parse_pcap(input_path: str, qtuiobj=None):
 
 
 def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
+    global SYN_ACK
     sport = tcp.sport
     dport = tcp.dport
     if not (sport, dport) in port_pair_c2s and not (dport, sport) in port_pair_c2s:
@@ -161,57 +170,72 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
                     parse_tls_cn(tcp.data, sport)
                 except Exception as e:
                     print(e)
+            # 解析TLS分片包
+            elif (sport, dst, dport) in tls_caches:
+                parse_tcp_application_layer(tcp, dst)
+            # 解析HTTP分片包
+            elif (sport, dst, dport) in http_caches:
+                parse_tcp_application_layer(tcp, dst)
         # 四元组未在字典中，表示此流首次解析。若三次握手完成则解析。
         else:
             tcp_4tuple_dict[src2dst] = 1
             try:
-                if tcp_handshake_complete[src2dst] == 36:
+                if tcp_handshake_complete[src2dst] >= 36 and SYN_ACK[src2dst]:
                     parse_tcp_application_layer(tcp, dst)
             except KeyError:
                 try:
-                    if tcp_handshake_complete[src2dst_rvs] == 36:
+                    if tcp_handshake_complete[src2dst_rvs] >= 36 and SYN_ACK[src2dst_rvs]:
                         parse_tcp_application_layer(tcp, src)
                 except KeyError:
-                    print("May encouter uncaptured TCP handshake.Skip")
+                    print(f"May encouter uncaptured TCP handshake,info:{src}:{sport}->{dst}:{dport}.Skip.")
 
     # 如果本包tcp负载为0，则进行握手标志位判断
     else:
         if src2dst in tcp_handshake_complete or src2dst_rvs in tcp_handshake_complete:
             try:
                 tcp_handshake_complete[src2dst] += tcp.flags
+                if tcp.flags == 18:
+                    SYN_ACK[src2dst] = True
             except KeyError:
                 tcp_handshake_complete[src2dst_rvs] += tcp.flags
+                if tcp.flags == 18:
+                    SYN_ACK[src2dst_rvs] = True
         else:
             tcp_handshake_complete[src2dst] = tcp.flags
 
 
 def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
+    global tls_caches
+    sport = tcp.sport
+    dport = tcp.dport
     if len(tcp.data) == 0:
         return
-    # dpkt似乎没有方法可以在读到一个packet时得知其具有的应用层协议还是仅tcp协议，必须从下往上层层剥离。
-    # 解析HTTP/HTTPS目前想到的两种方式可能只能是：
-    # （1）判断tcp.data是否含有HTTP/HTTPS特有的内容；
-    # （2）异常处理，先将tcp.data直接当成HTTP解析，抛出异常时当成HTTPS解析，还抛出异常则当无应用层的TCP协议解析。
-    try:
-        request = dpkt.http.Request(tcp.data)
-        parse_http_request(request, tcp.dport)
-    except dpkt.dpkt.UnpackError:  # 若尝试解析HTTP引发UnpackError，改为尝试解析TLS server_name
+    # 通过判断tcp载荷内容确定是否是TLS或HTTP，通过异常处理跳转解析普通TCP
+    if b'\x16\x03' == tcp.data[:2] or (sport, server_ipaddr, dport) in tls_caches:
+        if (sport, server_ipaddr, dport) in tls_caches:
+            maybe_tls = tls_caches.pop((sport, server_ipaddr, dport)) + tcp.data
+        else:
+            maybe_tls = tcp.data
         try:
-            global tlsSNI_parsed_port_pair
-            tls = dpkt.ssl.TLS(tcp.data)
-            parse_tls_server(tls, tcp.dport)
-            tlsSNI_parsed_port_pair[(tcp.sport, tcp.dport)] = 1
-        except:  # 若尝试解析TLS仍引发异常，则按普通TCP Payload解析
-            tcp_payload_head = str(tcp.data[:other_tcp_payload_len])
-            tcp_payload_tail = str(tcp.data[-other_tcp_payload_len:])
-            if (tcp.sport, tcp.dport) in port_pair_c2s:
-                tcp_payload_head += f"    {str(tcp.sport)}->{server_ipaddr}:{str(tcp.dport)}"
-                tcp_payload_tail += f"    {str(tcp.sport)}->{server_ipaddr}:{str(tcp.dport)}"
-            else:
-                tcp_payload_head += f"    {server_ipaddr}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
-                tcp_payload_tail += f"    {server_ipaddr}:{str(tcp.dport)}->{str(tcp.sport)}[reply]"
-            add_dict_kv(TCP_PAYLOAD_HEAD, tcp_payload_head)
-            add_dict_kv(TCP_PAYLOAD_TAIL, tcp_payload_tail)
+            tls = dpkt.ssl.TLS(maybe_tls)
+            parse_tls_server(tls, dport)
+        except NeedData:  # 分片TLS
+            tls_caches[(sport, server_ipaddr, dport)] = tcp.data
+        except UnpackError:  # 非TLS
+            record_tcp_payload(maybe_tls, server_ipaddr, sport, dport)
+    else:  # 解析HTTP或普通TCP
+        if (sport, server_ipaddr, dport) in http_caches:
+            maybe_http = http_caches.pop((sport, server_ipaddr, dport)) + tcp.data
+        else:
+            maybe_http = tcp.data
+        try:
+            http_request = dpkt.http.Request(maybe_http)
+            parse_http_request(http_request, dport)
+        except NeedData:  # 分片HTTP
+            http_caches[(sport, server_ipaddr, dport)] = tcp.data
+        except UnpackError:  # 非HTTP
+            record_tcp_payload(maybe_http, server_ipaddr, sport, dport)
+
 
 
 def parse_http_request(http: dpkt.http.Request, dport: int):
@@ -264,6 +288,20 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
             add_dict_kv(TLS_CN, commonName)
 
 
+def record_tcp_payload(tcpdata: bytes, server_ipaddr: str, sport, dport):
+    global port_pair_c2s
+    tcp_payload_head = str(tcpdata[:other_tcp_payload_len])
+    tcp_payload_tail = str(tcpdata[-other_tcp_payload_len:])
+    if (sport, dport) in port_pair_c2s:
+        tcp_payload_head += f"    {str(sport)}->{server_ipaddr}:{str(dport)}"
+        tcp_payload_tail += f"    {str(sport)}->{server_ipaddr}:{str(dport)}"
+    else:
+        tcp_payload_head += f"    {server_ipaddr}:{str(dport)}->{str(sport)}[reply]"
+        tcp_payload_tail += f"    {server_ipaddr}:{str(dport)}->{str(sport)}[reply]"
+    add_dict_kv(TCP_PAYLOAD_HEAD, tcp_payload_head)
+    add_dict_kv(TCP_PAYLOAD_TAIL, tcp_payload_tail)
+
+
 def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
     if (src, udp.sport, dst, udp.dport) not in udp_4tuple_dict and (dst, udp.dport, src, udp.sport) not in udp_4tuple_dict:
         if udp.dport == 53:
@@ -291,7 +329,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'F:\pcap_fac\20231204-20231205\classified_by_hwapp\4399\20231204.pcap.TCP_10-61-15-7_38844_183-6-211-61_443.pcap'
+    input_pcap_file = r'E:\pcap_collection\！零散抓包\文叔叔-上传\文叔叔-上传1.pcap'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)

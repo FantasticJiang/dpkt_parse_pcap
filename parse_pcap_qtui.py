@@ -51,8 +51,8 @@ def main():
     parse_widget = ParseWidget()
 
     screen = QDesktopWidget().screenGeometry()
-    left = screen.width() * 0.42
-    top = screen.height() * 0.02
+    left = int(screen.width() * 0.42)
+    top = int(screen.height() * 0.02)
     parse_widget.move(left, top)
 
     parse_widget.show()
