@@ -194,11 +194,11 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
         if src2dst in tcp_handshake_complete or src2dst_rvs in tcp_handshake_complete:
             try:
                 tcp_handshake_complete[src2dst] += tcp.flags
-                if tcp.flags == 18:
+                if tcp.flags >= 18:
                     SYN_ACK[src2dst] = True
             except KeyError:
                 tcp_handshake_complete[src2dst_rvs] += tcp.flags
-                if tcp.flags == 18:
+                if tcp.flags >= 18:
                     SYN_ACK[src2dst_rvs] = True
         else:
             tcp_handshake_complete[src2dst] = tcp.flags
