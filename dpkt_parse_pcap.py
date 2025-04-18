@@ -303,14 +303,13 @@ def record_tcp_payload(tcpdata: bytes, server_ipaddr: str, sport, dport):
 
 
 def parse_udp(udp: dpkt.udp.UDP, src: str, dst: str):
-    if (src, udp.sport, dst, udp.dport) not in udp_4tuple_dict and (dst, udp.dport, src, udp.sport) not in udp_4tuple_dict:
-        if udp.dport == 53:
-            try:
-                parse_dns(udp)
-            except:
-                parse_udp_payload(udp, src, dst)
-        else:
+    if udp.dport == 53:
+        try:
+            parse_dns(udp)
+        except:
             parse_udp_payload(udp, src, dst)
+    elif udp.sport != 53 and (src, udp.sport, dst, udp.dport) not in udp_4tuple_dict and (dst, udp.dport, src, udp.sport) not in udp_4tuple_dict:
+        parse_udp_payload(udp, src, dst)
         udp_4tuple_dict[(src, udp.sport, dst, udp.dport)] = True
         udp_4tuple_dict[(dst, udp.dport, src, udp.sport)] = True
 
@@ -329,7 +328,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'E:\pcap_collection\！零散抓包\文叔叔-上传\文叔叔-上传1.pcap'
+    input_pcap_file = r'D:\!===市场反馈===\R473GP-AC5.0物联APP频繁离线\R479GP-AC4.0连云_含DNS.pcapng'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
