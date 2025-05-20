@@ -139,6 +139,9 @@ def parse_pcap(input_path: str, qtuiobj=None):
         qtuiobj.refresh_number(packet_count)
         # 解析完pcap文件中的所有分组，将特征字典写入log文件（在有UI的情况下才在parse内部写文件，如果是调用parse函数就先不写，留待调用处在需要时调用write_parse_result函数）
     # print(tcp_4tuple_dict)
+
+    #部分HTTP请求可能涉及上万个TCP包组装，抓包可能抓不到最后的HTTP组装包，导致最后http_caches字典内还有HTTP缓存，需要作为TCP流输出结果。
+    process_incomplete_caches(tls_caches, http_caches)
     import os
     filename = os.path.splitext(input_path)[0]
     write_parse_result(filename)
@@ -180,11 +183,11 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
         else:
             tcp_4tuple_dict[src2dst] = 1
             try:
-                if tcp_handshake_complete[src2dst] >= 36 and SYN_ACK[src2dst]:
+                if tcp_handshake_complete[src2dst] >= 20 and SYN_ACK[src2dst]:
                     parse_tcp_application_layer(tcp, dst)
             except KeyError:
                 try:
-                    if tcp_handshake_complete[src2dst_rvs] >= 36 and SYN_ACK[src2dst_rvs]:
+                    if tcp_handshake_complete[src2dst_rvs] >= 20 and SYN_ACK[src2dst_rvs]:
                         parse_tcp_application_layer(tcp, src)
                 except KeyError:
                     print(f"May encouter uncaptured TCP handshake,info:{src}:{sport}->{dst}:{dport}.Skip.")
@@ -206,6 +209,7 @@ def parse_tcp(tcp: dpkt.tcp.TCP, src: str, dst: str):
 
 def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
     global tls_caches
+    global http_caches
     sport = tcp.sport
     dport = tcp.dport
     if len(tcp.data) == 0:
@@ -232,7 +236,7 @@ def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
             http_request = dpkt.http.Request(maybe_http)
             parse_http_request(http_request, dport)
         except NeedData:  # 分片HTTP
-            http_caches[(sport, server_ipaddr, dport)] = tcp.data
+            http_caches[(sport, server_ipaddr, dport)] = maybe_http
         except UnpackError:  # 非HTTP
             record_tcp_payload(maybe_http, server_ipaddr, sport, dport)
 
@@ -288,6 +292,19 @@ def parse_tls_cn(tcpdata: bytes, dport: int):
             add_dict_kv(TLS_CN, commonName)
 
 
+
+def process_incomplete_caches(tls_caches, http_caches):
+    if tls_caches:
+        for key,value in tls_caches.items():
+            sport, dst, dport = key
+            record_tcp_payload(value, dst, sport, dport)
+    if http_caches:
+        for key,value in http_caches.items():
+            sport, dst, dport = key
+            record_tcp_payload(value, dst, sport, dport)
+
+
+
 def record_tcp_payload(tcpdata: bytes, server_ipaddr: str, sport, dport):
     global port_pair_c2s
     tcp_payload_head = str(tcpdata[:other_tcp_payload_len])
@@ -328,7 +345,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'D:\!===市场反馈===\R473GP-AC5.0物联APP频繁离线\R479GP-AC4.0连云_含DNS.pcapng'
+    input_pcap_file = r'E:\pcap_collection\测速工具抓包\花瓣测速\petalspeed.pcapng'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
