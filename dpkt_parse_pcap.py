@@ -111,8 +111,49 @@ def parse_pcap(input_path: str, qtuiobj=None):
             else:
                 print("skip none tcp and udp packet.")
                 continue
-        elif eth.type == 34525:  # eth.type == 0x86DD(十进制34525)表示上层是IPv6
-            pass
+        elif eth.type == 33024: # eth.type == 0x8100(十进制33024)表示上层是802.1Q
+            if isinstance(eth.data, dpkt.ip.IP):
+                ip = eth.data
+                src = socket.inet_ntoa(ip.src)
+                dst = socket.inet_ntoa(ip.dst)
+                # TCP
+                if isinstance(ip.data, dpkt.tcp.TCP):
+                    parse_tcp(ip.data, src, dst)
+                # UDP
+                elif isinstance(ip.data, dpkt.udp.UDP):
+                    parse_udp(ip.data, src, dst)
+                else:
+                    print("skip none tcp and udp packet.")
+                    continue
+            elif isinstance(eth.data, dpkt.ip6.IP6):
+                ip6 = eth.data
+                # IPv6地址需要用inet_ntop转换
+                src = socket.inet_ntop(socket.AF_INET6, ip6.src)
+                dst = socket.inet_ntop(socket.AF_INET6, ip6.dst)
+                # TCP
+                if isinstance(ip6.data, dpkt.tcp.TCP):
+                    parse_tcp(ip6.data, src, dst)
+                # UDP
+                elif isinstance(ip6.data, dpkt.udp.UDP):
+                    parse_udp(ip6.data, src, dst)
+                else:
+                    print("skip none tcp and udp packet (IPv6).")
+                    continue
+        elif eth.type == 34525:  # eth.type == 0x86DD(十进制34525)表示上层是IPv6 
+            ip6 = eth.data
+            # IPv6地址需要用inet_ntop转换
+            src = socket.inet_ntop(socket.AF_INET6, ip6.src)
+            dst = socket.inet_ntop(socket.AF_INET6, ip6.dst)
+            # TCP
+            if isinstance(ip6.data, dpkt.tcp.TCP):
+                parse_tcp(ip6.data, src, dst)
+            # UDP
+            elif isinstance(ip6.data, dpkt.udp.UDP):
+                parse_udp(ip6.data, src, dst)
+            else:
+                print("skip none tcp and udp packet (IPv6).")
+                continue
+
 
         # 非IPv4和IPv6，判断是否是PCAPDroid等工具抓取、没有二层报头的报文。
         else:
@@ -221,12 +262,14 @@ def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
         else:
             maybe_tls = tcp.data
         try:
-            tls = dpkt.ssl.TLS(maybe_tls)
-            parse_tls_server(tls, dport)
+            _tls = dpkt.ssl.TLS(maybe_tls)
         except NeedData:  # 分片TLS
             tls_caches[(sport, server_ipaddr, dport)] = tcp.data
         except UnpackError:  # 非TLS
             record_tcp_payload(maybe_tls, server_ipaddr, sport, dport)
+        else:
+            del _tls
+            parse_tls_server(maybe_tls, server_ipaddr, sport, dport)
     else:  # 解析HTTP或普通TCP
         if (sport, server_ipaddr, dport) in http_caches:
             maybe_http = http_caches.pop((sport, server_ipaddr, dport)) + tcp.data
@@ -243,7 +286,7 @@ def parse_tcp_application_layer(tcp: dpkt.tcp.TCP, server_ipaddr: str):
 
 
 def parse_http_request(http: dpkt.http.Request, dport: int):
-    # dpkt.http.Request对象将HTTP请求的状态行（第一行）中method、uri、version单独作为成员变量，第二行开始的所有HTTP字段放入名为header的有序字典变量中。
+    # dpkt.http.Request对象将HTTP请求的状态行（第一行）中method、uri、version单独作为成员变量，第二行开始的所有HTTP字段放入名为headers的有序字典变量中。
     headers = http.headers
     headers['method'] = http.method
     headers['uri'] = http.uri
@@ -270,14 +313,19 @@ def parse_http_request(http: dpkt.http.Request, dport: int):
     # print(f'HTTP request: {repr(http)}')
 
 
-def parse_tls_server(tls: dpkt.ssl.TLS, dport: int):
+def parse_tls_server(maybe_tls: bytes, server_ip: str, sport: int, dport: int):
+    tls = dpkt.ssl.TLS(maybe_tls)
     handshake = dpkt.ssl.TLSHandshake(tls.records[0].data)
     client_hello = handshake.data
+    has_sni = 0
     for ext in client_hello.extensions:
         if ext[0] == 0:  # 扩展字段类型值，0为server_name
             ser_name = ext[1][5:].decode()
             ser_name_ = ser_name + f' [{str(dport)}]'
             add_dict_kv(TLS_SERVER_NAME, ser_name_)
+            has_sni = 1
+    if has_sni == 0:
+        record_tcp_payload(maybe_tls, server_ip, sport, dport)
 
 
 def parse_tls_cn(tcpdata: bytes, dport: int):
@@ -345,7 +393,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'E:\pcap_collection\测速工具抓包\花瓣测速\petalspeed.pcapng'
+    input_pcap_file = r'D:\新建文件夹\WXWork\1688854447666277\Cache\File\2025-07\无SNI的HTTPS.pcapng'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
