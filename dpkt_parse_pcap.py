@@ -318,13 +318,16 @@ def parse_tls_server(maybe_tls: bytes, server_ip: str, sport: int, dport: int):
     handshake = dpkt.ssl.TLSHandshake(tls.records[0].data)
     client_hello = handshake.data
     has_sni = 0
-    for ext in client_hello.extensions:
-        if ext[0] == 0:  # 扩展字段类型值，0为server_name
-            ser_name = ext[1][5:].decode()
-            ser_name_ = ser_name + f' [{str(dport)}]'
-            add_dict_kv(TLS_SERVER_NAME, ser_name_)
-            has_sni = 1
-    if has_sni == 0:
+    if hasattr(client_hello, 'extensions'):  # 先判断TLS握手里有没有扩展字段，在进行解析。没有任何扩展字段直接作为普通TCP记录payload
+        for ext in client_hello.extensions:
+            if ext[0] == 0:  # 扩展字段类型值，0为server_name
+                ser_name = ext[1][5:].decode()
+                ser_name_ = ser_name + f' [{str(dport)}]'
+                add_dict_kv(TLS_SERVER_NAME, ser_name_)
+                has_sni = 1
+        if has_sni == 0:
+            record_tcp_payload(maybe_tls, server_ip, sport, dport)
+    else:
         record_tcp_payload(maybe_tls, server_ip, sport, dport)
 
 
@@ -393,7 +396,7 @@ def parse_dns(udp: dpkt.udp.UDP):
 
 
 if __name__ == "__main__":
-    input_pcap_file = r'D:\新建文件夹\WXWork\1688854447666277\Cache\File\2025-07\无SNI的HTTPS.pcapng'
+    input_pcap_file = r'D:\!!!应用特征库\===网管反馈===\企微收发图片失败重传\re_企业微信传文件.pcapng'
     import time
     start = time.time()
     parse_pcap(input_pcap_file)
