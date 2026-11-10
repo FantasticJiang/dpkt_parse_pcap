@@ -1,0 +1,17 @@
+[project]
+name = "dpkt-parse-pcap"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "dpkt>=1.9.8",
+    "pandas>=3.1.1",
+    "pyqt5>=5.15.11",
+]
+[tool.uv]
+required-environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.3",
+]

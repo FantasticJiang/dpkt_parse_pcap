@@ -1,6 +1,15 @@
 # MyCustom
-pcaps/
 reference/
+*.rar
+*.zip
+*.7z
+*.exe
+*.pcap
+*.pcapng
+*.xlsx
+*.csv
+*.mhtml
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -35,6 +44,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!dpkt_parse_pcap.spec
 
 # Installer logs
 pip-log.txt
